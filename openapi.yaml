@@ -1,0 +1,144 @@
+openapi: 3.0.3
+info:
+  title: Order Tracking API
+  version: 1.0.0
+  description: Small production-style API for game top-up order tracking and automated recovery.
+servers:
+  - url: http://localhost:8088/api/v1
+paths:
+  /orders:
+    post:
+      summary: Create an order idempotently
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema: { type: string, minLength: 8, maxLength: 128 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateOrder' }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/OrderEnvelope' } } } }
+        '200': { description: Existing order replayed }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+    get:
+      summary: List current or historical orders, newest first
+      parameters:
+        - { in: query, name: tab, schema: { type: string, enum: [current, history], default: current } }
+        - { in: query, name: page, schema: { type: integer, minimum: 1, default: 1 } }
+        - { in: query, name: pageSize, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+      responses:
+        '200': { description: Paginated orders }
+        '400': { $ref: '#/components/responses/BadRequest' }
+  /orders/{orderNo}:
+    parameters: [ { $ref: '#/components/parameters/OrderNo' } ]
+    get:
+      summary: Get an order by order number
+      responses:
+        '200': { description: Order found, content: { application/json: { schema: { $ref: '#/components/schemas/OrderEnvelope' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /orders/{orderNo}/timeline:
+    parameters: [ { $ref: '#/components/parameters/OrderNo' } ]
+    get:
+      summary: Get the append-only order timeline
+      responses:
+        '200': { description: Timeline }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /orders/{orderNo}/report-issue:
+    parameters: [ { $ref: '#/components/parameters/OrderNo' } ]
+    post:
+      summary: Report an order issue
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [issueType, description]
+              properties:
+                issueType: { type: string, minLength: 2, maxLength: 50 }
+                description: { type: string, minLength: 5, maxLength: 1000 }
+      responses:
+        '201': { description: Issue created }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /internal/bots/claim:
+    post:
+      summary: Atomically claim one queued order
+      security: [ InternalToken: [] ]
+      responses: { '200': { description: Claimed }, '204': { description: Queue empty } }
+  /internal/bots/heartbeat:
+    post:
+      summary: Extend a bot lease
+      security: [ InternalToken: [] ]
+      responses: { '204': { description: Lease extended }, '409': { $ref: '#/components/responses/Conflict' } }
+  /internal/orders/{orderNo}/result:
+    parameters: [ { $ref: '#/components/parameters/OrderNo' } ]
+    post:
+      summary: Submit bot result; transient failures retry with backoff
+      security: [ InternalToken: [] ]
+      responses: { '200': { description: Result accepted }, '409': { $ref: '#/components/responses/Conflict' } }
+  /internal/orders/{orderNo}/player-uid:
+    parameters: [ { $ref: '#/components/parameters/OrderNo' } ]
+    patch:
+      summary: Correct a failed order UID and requeue it
+      security: [ InternalToken: [] ]
+      responses: { '200': { description: Corrected and requeued }, '409': { $ref: '#/components/responses/Conflict' } }
+  /internal/bank/webhooks:
+    post:
+      summary: Process an HMAC-signed idempotent bank event
+      security: [ InternalToken: [], WebhookSignature: [] ]
+      responses: { '200': { description: Processed or replayed }, '401': { description: Invalid signature } }
+  /internal/maintenance/sweep:
+    post:
+      summary: Run the idempotent expiry, stale-lease, and queue-SLA sweep
+      security: [ InternalToken: [] ]
+      responses: { '200': { description: Sweep statistics } }
+components:
+  securitySchemes:
+    InternalToken: { type: apiKey, in: header, name: X-Internal-Token }
+    WebhookSignature: { type: apiKey, in: header, name: X-Webhook-Signature }
+  parameters:
+    OrderNo:
+      in: path
+      name: orderNo
+      required: true
+      schema: { type: string, pattern: '^ORD-[0-9]{13}-[0-9]{3}$', example: ORD-2587965432159-458 }
+  schemas:
+    CreateOrder:
+      type: object
+      required: [customerRef, productCode, playerUid, amount]
+      properties:
+        customerRef: { type: string, example: CUST-001 }
+        productCode: { type: string, example: DIAMOND-100 }
+        playerUid: { type: string, example: '99887766' }
+        amount: { type: string, pattern: '^[0-9]+(\.[0-9]{1,2})?$', example: '100.00' }
+    Order:
+      type: object
+      properties:
+        orderNo: { type: string }
+        status: { type: string, enum: [PENDING_PAYMENT, QUEUED, IN_PROGRESS, COMPLETED, DELAYED, FAILED, EXPIRED, REFUNDED] }
+        amount: { type: string, description: Decimal string; never a float source of truth }
+        retryCount: { type: integer }
+        version: { type: integer }
+    OrderEnvelope:
+      type: object
+      properties: { data: { $ref: '#/components/schemas/Order' } }
+    Error:
+      type: object
+      required: [code, message, requestId]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        fieldErrors: { type: object, additionalProperties: { type: string } }
+        requestId: { type: string }
+  responses:
+    BadRequest: { description: Invalid request, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    NotFound: { description: Order not found, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    Conflict: { description: Idempotency, state, or lease conflict, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+

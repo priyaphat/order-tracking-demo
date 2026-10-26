@@ -1,0 +1,45 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: order_tracking
+      POSTGRES_USER: order_app
+      POSTGRES_PASSWORD: order_local
+    ports:
+      - "127.0.0.1:5438:5432"
+    volumes:
+      - order_tracking_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U order_app -d order_tracking"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  api:
+    build: .
+    environment:
+      HTTP_ADDR: :8080
+      DATABASE_URL: postgres://order_app:order_local@postgres:5432/order_tracking?sslmode=disable
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-local-worker-token}
+      BANK_WEBHOOK_SECRET: ${BANK_WEBHOOK_SECRET:-local-bank-secret}
+      LEASE_DURATION: ${LEASE_DURATION:-2m}
+      PAYMENT_TTL: ${PAYMENT_TTL:-15m}
+      QUEUE_SLA: ${QUEUE_SLA:-5m}
+      SWEEP_INTERVAL: ${SWEEP_INTERVAL:-10s}
+      MAX_RETRIES: ${MAX_RETRIES:-3}
+    ports:
+      - "8088:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  order_tracking_postgres:
+

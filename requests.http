@@ -1,0 +1,98 @@
+@baseUrl = http://localhost:8088/api/v1
+@internalToken = local-worker-token
+@orderNo = REPLACE_WITH_ORDER_NO
+
+### Health
+GET http://localhost:8088/health/ready
+
+### Create order (repeat unchanged to verify idempotency)
+POST {{baseUrl}}/orders
+Content-Type: application/json
+Idempotency-Key: demo-order-0001
+
+{
+  "customerRef": "CUST-001",
+  "productCode": "DIAMOND-100",
+  "playerUid": "99887766",
+  "amount": "100.00"
+}
+
+### Invalid order number => 400
+GET {{baseUrl}}/orders/not-an-order
+
+### Missing valid order => 404
+GET {{baseUrl}}/orders/ORD-2587965432159-458
+
+### Current orders
+GET {{baseUrl}}/orders?tab=current&page=1&pageSize=20
+
+### Historical orders
+GET {{baseUrl}}/orders?tab=history&page=1&pageSize=20
+
+### Order detail
+GET {{baseUrl}}/orders/{{orderNo}}
+
+### Timeline
+GET {{baseUrl}}/orders/{{orderNo}}/timeline
+
+### Report issue
+POST {{baseUrl}}/orders/{{orderNo}}/report-issue
+Content-Type: application/json
+
+{
+  "issueType": "TOPUP_NOT_RECEIVED",
+  "description": "Payment completed but the game balance has not changed."
+}
+
+### Claim queued order (run paid webhook first)
+POST {{baseUrl}}/internal/bots/claim
+Content-Type: application/json
+X-Internal-Token: {{internalToken}}
+
+{
+  "workerId": "bot-01"
+}
+
+### Heartbeat
+POST {{baseUrl}}/internal/bots/heartbeat
+Content-Type: application/json
+X-Internal-Token: {{internalToken}}
+
+{
+  "workerId": "bot-01",
+  "orderNo": "{{orderNo}}"
+}
+
+### Bot success (outcome also accepts transient_failure / permanent_failure)
+POST {{baseUrl}}/internal/orders/{{orderNo}}/result
+Content-Type: application/json
+X-Internal-Token: {{internalToken}}
+
+{
+  "workerId": "bot-01",
+  "outcome": "success",
+  "errorCode": "",
+  "message": "Provider confirmed top-up"
+}
+
+### Correct UID after permanent failure
+PATCH {{baseUrl}}/internal/orders/{{orderNo}}/player-uid
+Content-Type: application/json
+X-Internal-Token: {{internalToken}}
+
+{
+  "playerUid": "11223344"
+}
+
+### Manual idempotent maintenance run
+POST {{baseUrl}}/internal/maintenance/sweep
+X-Internal-Token: {{internalToken}}
+
+### Bank webhook
+# Body signature is HMAC-SHA256 hex using local-bank-secret.
+# PowerShell helper:
+# $body='{"eventId":"bank-evt-001","orderNo":"YOUR_ORDER_NO","status":"paid"}'
+# $h=[System.Security.Cryptography.HMACSHA256]::new([Text.Encoding]::UTF8.GetBytes('local-bank-secret'))
+# $sig=[Convert]::ToHexString($h.ComputeHash([Text.Encoding]::UTF8.GetBytes($body))).ToLower()
+# Invoke-RestMethod http://localhost:8088/api/v1/internal/bank/webhooks -Method Post -Headers @{'X-Internal-Token'='local-worker-token';'X-Webhook-Signature'=$sig} -ContentType application/json -Body $body
+
